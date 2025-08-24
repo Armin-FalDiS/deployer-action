@@ -1,0 +1,120 @@
+name: 'Docker Deploy Action'
+description: 'Build, upload, and deploy Docker images to a remote server'
+author: 'Armin'
+
+inputs:
+  project_name:
+    description: 'Name of the project (defaults to repository name if not provided)'
+    required: false
+  
+  build_name:
+    description: 'Build name/version (defaults to branch name if not provided)'
+    required: false
+  
+  port:
+    description: 'Host port to expose the container on'
+    required: false
+    default: '3000'
+  
+  env_vars:
+    description: 'Environment variables in KEY=value format (one per line)'
+    required: false
+  
+  server_address:
+    description: 'Address of the server that project should be deployed onto'
+    required: true
+  
+  ssh_private_key:
+    description: 'SSH private key for server access'
+    required: true
+  
+  ssh_user:
+    description: 'SSH user for server access'
+    required: false
+    default: 'deployer'
+  
+  container_port:
+    description: 'Container internal port'
+    required: false
+    default: '3000'
+  
+  docker_args:
+    description: 'Additional Docker run arguments'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Variables
+      shell: bash
+      run: |
+        cat > vars.sh << EOF
+        PROJECT_NAME="${{ inputs.project_name || github.event.repository.name }}"
+        BUILD_NAME="${{ inputs.build_name || github.ref_name }}"
+        EOF
+
+    - name: Setup Environment File
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.env_vars }}" ]; then
+          echo "${{ inputs.env_vars }}" > .env
+        else
+          touch .env
+        fi
+        chmod 644 .env
+
+    - name: Build Docker Image
+      shell: bash
+      run: |
+        source vars.sh
+        docker build -t $PROJECT_NAME:$BUILD_NAME .
+
+    - name: Save Docker Image as tarball
+      shell: bash
+      run: |
+        source vars.sh
+        docker save $PROJECT_NAME:$BUILD_NAME -o image.tar
+
+    - name: Set up SSH
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        (umask 066; echo "${{ inputs.ssh_private_key }}" > ~/.ssh/id_ed25519)
+        echo "
+          Host Server
+            HostName ${{ inputs.server_address }}
+            User ${{ inputs.ssh_user }}
+            StrictHostKeyChecking no
+        " > ~/.ssh/config
+
+    - name: Create remote directory if it does not exist
+      shell: bash
+      run: |
+        source vars.sh
+        ssh Server "mkdir -p /opt/$PROJECT_NAME/$BUILD_NAME"
+
+    - name: Upload Docker Image tarball and ENV file to Server
+      shell: bash
+      run: |
+        source vars.sh
+        scp image.tar Server:/opt/$PROJECT_NAME/$BUILD_NAME/image.tar
+        if [ -f .env ]; then
+          scp .env Server:/opt/$PROJECT_NAME/$BUILD_NAME/.env
+        fi
+
+    - name: Load and Run Docker Image on Server
+      shell: bash
+      run: |
+        source vars.sh
+        ENV_FILE_ARG=""
+        if [ -f .env ]; then
+          ENV_FILE_ARG="--env-file /opt/$PROJECT_NAME/$BUILD_NAME/.env"
+        fi
+        
+        ssh Server -C "
+          docker load < /opt/$PROJECT_NAME/$BUILD_NAME/image.tar &&
+          docker rm -f $PROJECT_NAME-$BUILD_NAME || true &&
+          docker run -d --restart unless-stopped --name $PROJECT_NAME-$BUILD_NAME $ENV_FILE_ARG -p 127.0.0.1:${{ inputs.port }}:${{ inputs.container_port }} ${{ inputs.docker_args }} $PROJECT_NAME:$BUILD_NAME &&
+          docker image prune -f || true &&
+          rm /opt/$PROJECT_NAME/$BUILD_NAME/image.tar
+        "

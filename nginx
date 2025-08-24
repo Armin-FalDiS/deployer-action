@@ -1,0 +1,33 @@
+map $host $proxy_port {
+    app.example.com            7000;
+    staging.example.com        7001;
+    dev.example.com            7002;
+    beta.example.com           7003;
+}
+
+server {
+    server_name app.example.com;
+    include reverse-proxy.conf;
+}
+
+server {
+    server_name staging.example.com dev.example.com;
+    include reverse-proxy.conf;
+
+    auth_basic "Internal";
+    auth_basic_user_file /var/www/internal.htpasswd;
+}
+
+server {
+    server_name beta.example.com;
+    include reverse-proxy.conf;
+    
+    auth_basic "External";
+    auth_basic_user_file /var/www/external.htpasswd;
+}
+
+server {
+    listen 80;
+    server_name app.example.com staging.example.com dev.example.com beta.example.com;
+    return 301 https://$server_name$request_uri;
+}
